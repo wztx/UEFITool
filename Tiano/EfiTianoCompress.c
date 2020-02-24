@@ -69,18 +69,15 @@ PutDword(
 
 STATIC
 EFI_STATUS 
-AllocateMemory (
-  );
+AllocateMemory (VOID);
 
 STATIC
 VOID
-FreeMemory (
-  );
+FreeMemory (VOID);
 
 STATIC 
 VOID 
-InitSlide (
-  );
+InitSlide (VOID);
 
 STATIC 
 NODE 
@@ -105,28 +102,23 @@ Split (
 
 STATIC 
 VOID 
-InsertNode (
-  );
+InsertNode (VOID);
   
 STATIC 
 VOID 
-DeleteNode (
-  );
+DeleteNode (VOID);
 
 STATIC 
 VOID 
-GetNextMatch (
-  );
+GetNextMatch (VOID);
   
 STATIC 
 EFI_STATUS 
-Encode (
-  );
+Encode (VOID);
 
 STATIC 
 VOID 
-CountTFreq (
-  );
+CountTFreq (VOID);
 
 STATIC 
 VOID 
@@ -138,8 +130,7 @@ WritePTLen (
 
 STATIC 
 VOID 
-WriteCLen (
-  );
+WriteCLen (VOID);
   
 STATIC 
 VOID 
@@ -155,8 +146,7 @@ EncodeP (
 
 STATIC 
 VOID 
-SendBlock (
-  );
+SendBlock (VOID);
   
 STATIC 
 VOID 
@@ -167,18 +157,15 @@ Output (
 
 STATIC 
 VOID 
-HufEncodeStart (
-  );
+HufEncodeStart (VOID);
   
 STATIC 
 VOID 
-HufEncodeEnd (
-  );
+HufEncodeEnd (VOID);
   
 STATIC 
 VOID 
-MakeCrcTable (
-  );
+MakeCrcTable (VOID);
   
 STATIC 
 VOID 
@@ -196,8 +183,7 @@ FreadCrc (
   
 STATIC 
 VOID 
-InitPutBits (
-  );
+InitPutBits (VOID);
   
 STATIC 
 VOID 
@@ -506,17 +492,24 @@ Returns:
   UINT32      i;
   
   mText       = malloc (WNDSIZ * 2 + MAXMATCH);
+  if (!mText) return EFI_OUT_OF_RESOURCES;
   for (i = 0 ; i < WNDSIZ * 2 + MAXMATCH; i ++) {
     mText[i] = 0;
   }
 
-  mLevel      = malloc ((WNDSIZ + UINT8_MAX + 1) * sizeof(*mLevel));
-  mChildCount = malloc ((WNDSIZ + UINT8_MAX + 1) * sizeof(*mChildCount));
-  mPosition   = malloc ((WNDSIZ + UINT8_MAX + 1) * sizeof(*mPosition));
-  mParent     = malloc (WNDSIZ * 2 * sizeof(*mParent));
-  mPrev       = malloc (WNDSIZ * 2 * sizeof(*mPrev));
-  mNext       = malloc ((MAX_HASH_VAL + 1) * sizeof(*mNext));
-  
+  mLevel            = malloc((WNDSIZ + UINT8_MAX + 1) * sizeof(*mLevel));
+  if (!mLevel)        return EFI_OUT_OF_RESOURCES;
+  mChildCount       = malloc((WNDSIZ + UINT8_MAX + 1) * sizeof(*mChildCount));
+  if (!mChildCount)   return EFI_OUT_OF_RESOURCES;
+  mPosition         = malloc((WNDSIZ + UINT8_MAX + 1) * sizeof(*mPosition));
+  if (!mPosition)     return EFI_OUT_OF_RESOURCES;
+  mParent           = malloc(WNDSIZ * 2 * sizeof(*mParent));
+  if (!mParent)       return EFI_OUT_OF_RESOURCES;
+  mPrev             = malloc(WNDSIZ * 2 * sizeof(*mPrev));
+  if (!mPrev)         return EFI_OUT_OF_RESOURCES;
+  mNext             = malloc((MAX_HASH_VAL + 1) * sizeof(*mNext));
+  if (!mNext)         return EFI_OUT_OF_RESOURCES;
+
   mBufSiz = 16 * 1024U;
   while ((mBuf = malloc(mBufSiz)) == NULL) {
     mBufSiz = (mBufSiz / 10U) * 9U;

@@ -1,6 +1,6 @@
 /* uefipatch_main.cpp
 
-Copyright (c) 2015, Nikolaj Schlej. All rights reserved.
+Copyright (c) 2018, LongSoft. All rights reserved.
 This program and the accompanying materials
 are licensed and made available under the terms and conditions of the BSD License
 which accompanies this distribution.  The full text of the license may be found at
@@ -14,27 +14,56 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include <QString>
 #include <QStringList>
 #include <iostream>
+#include <string>
+
+#include "../version.h"
 #include "uefipatch.h"
 
 int main(int argc, char *argv[])
 {
     QCoreApplication a(argc, argv);
-    a.setOrganizationName("CodeRush");
-    a.setOrganizationDomain("coderush.me");
+    a.setOrganizationName("LongSoft");
+    a.setOrganizationDomain("longsoft.me");
     a.setApplicationName("UEFIPatch");
 
     UEFIPatch w;
     UINT8 result = ERR_SUCCESS;
-    UINT32 argumentsCount = a.arguments().length();
-    
-    if (argumentsCount == 2) {
-        result = w.patchFromFile(a.arguments().at(1));
-    }
-    else {
-        std::cout << "UEFIPatch 0.3.9 - UEFI image file patching utility" << std::endl << std::endl <<
-            "Usage: UEFIPatch image_file" << std::endl << std::endl <<
-            "Patches will be read from patches.txt file\n";
+    const QStringList &args = a.arguments();
+    UINT32 argumentsCount = args.length();
+
+    if (argumentsCount < 2) {
+        std::cout << "UEFIPatch " PROGRAM_VERSION " - UEFI image file patching utility" << std::endl << std::endl <<
+            "Usage: UEFIPatch image_file [patches.txt] [-o output]" << std::endl <<
+            "Usage: UEFIPatch image_file [-p \"Guid SectionType Patch\"] [-o output]" << std::endl << std::endl <<
+            "Patches will be read from patches.txt file by default\n";
         return ERR_SUCCESS;
+    }
+
+    QString inputPath = a.arguments().at(1);
+    QString patches = "patches.txt";
+    QString outputPath = inputPath + ".patched";
+    int patchFrom = PATCH_FROM_FILE;
+    for (UINT32 i = 2; i < argumentsCount; i++) {
+        if ((args.at(i) == "-p" || args.at(i) == "--patch") && i + 1 < argumentsCount) {
+            patchFrom = PATCH_FROM_ARG;
+            patches = args.at(i+1);
+            i++;
+        } else if ((args.at(i) == "-o" || args.at(i) == "--output") && i + 1 < argumentsCount) {
+            outputPath = args.at(i+1);
+            i++;
+        } else if (patches == "patches.txt") {
+            patches = args.at(i);
+        } else {
+            result = ERR_INVALID_PARAMETER;
+        }
+    }
+
+    if (result == ERR_SUCCESS) {
+        if (patchFrom == PATCH_FROM_FILE) {
+            result = w.patchFromFile(inputPath, patches, outputPath);
+        } else if (patchFrom == PATCH_FROM_ARG) {
+            result = w.patchFromArg(inputPath, patches, outputPath);
+        }
     }
 
     switch (result) {
@@ -57,7 +86,7 @@ int main(int argc, char *argv[])
         std::cout << "Pattern format mismatch" << std::endl;
         break;
     case ERR_INVALID_FILE:
-        std::cout << "patches.txt file not found or can't be read" << std::endl;
+        std::cout << patches.toStdString() << " file not found or can't be read" << std::endl;
         break;
     case ERR_FILE_OPEN:
         std::cout << "Input file not found" << std::endl;

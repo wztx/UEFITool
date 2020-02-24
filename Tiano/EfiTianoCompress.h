@@ -20,8 +20,8 @@ Header file for compression routine.
 
 */
 
-#ifndef _EFITIANOCOMPRESS_H_
-#define _EFITIANOCOMPRESS_H_
+#ifndef EFITIANOCOMPRESS_H
+#define EFITIANOCOMPRESS_H
 
 #include <string.h>
 #include <stdlib.h>
@@ -115,4 +115,4 @@ extern "C" {
 #ifdef __cplusplus
 }
 #endif
-#endif
+#endif // EFITIANOCOMPRESS_H

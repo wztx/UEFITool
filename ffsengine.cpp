@@ -286,16 +286,10 @@ UINT8 FfsEngine::parseIntelImage(const QByteArray & intelImage, QModelIndex & in
     const FLASH_DESCRIPTOR_REGION_SECTION* regionSection = (const FLASH_DESCRIPTOR_REGION_SECTION*)calculateAddress8(descriptor, descriptorMap->RegionBase);
     const FLASH_DESCRIPTOR_COMPONENT_SECTION* componentSection = (const FLASH_DESCRIPTOR_COMPONENT_SECTION*)calculateAddress8(descriptor, descriptorMap->ComponentBase);
 
-    // Check descriptor version by getting hardcoded value of FlashParameters.ReadClockFrequency
-    UINT8 descriptorVersion = 0;
-    if (componentSection->FlashParameters.ReadClockFrequency == FLASH_FREQUENCY_20MHZ)      // Old descriptor
+    // Check for legacy descriptor version by getting hardcoded value of FlashParameters.ReadClockFrequency
+    UINT8 descriptorVersion = 2; // Skylake+ descriptor
+    if (componentSection->FlashParameters.ReadClockFrequency == FLASH_FREQUENCY_20MHZ)  // Legacy descriptor
         descriptorVersion = 1;
-    else if (componentSection->FlashParameters.ReadClockFrequency == FLASH_FREQUENCY_17MHZ) // Skylake+ descriptor
-        descriptorVersion = 2;
-    else {
-        msg(tr("parseIntelImage: unknown descriptor version with ReadClockFrequency %1h").hexarg(componentSection->FlashParameters.ReadClockFrequency));
-        return ERR_INVALID_FLASH_DESCRIPTOR;
-    }
 
     // ME region
     QByteArray me;
@@ -364,9 +358,9 @@ UINT8 FfsEngine::parseIntelImage(const QByteArray & intelImage, QModelIndex & in
     UINT32 ecEnd = 0;
     if (descriptorVersion == 2) {
         if (regionSection->EcLimit) {
-            pdrBegin = calculateRegionOffset(regionSection->EcBase);
-            pdrEnd = calculateRegionSize(regionSection->EcBase, regionSection->EcLimit);
-            pdr = intelImage.mid(ecBegin, ecEnd);
+            ecBegin = calculateRegionOffset(regionSection->EcBase);
+            ecEnd = calculateRegionSize(regionSection->EcBase, regionSection->EcLimit);
+            ec = intelImage.mid(ecBegin, ecEnd);
             ecEnd += ecBegin;
         }
     }
@@ -542,6 +536,17 @@ UINT8 FfsEngine::parseIntelImage(const QByteArray & intelImage, QModelIndex & in
         info += tr("\nEC    %1  %2")
             .arg(masterSection->BiosRead  & FLASH_DESCRIPTOR_REGION_ACCESS_EC ? "Yes " : "No  ")
             .arg(masterSection->BiosWrite & FLASH_DESCRIPTOR_REGION_ACCESS_EC ? "Yes " : "No  ");
+
+        // Prepend descriptor version if present
+        if (descriptorMap->DescriptorVersion != FLASH_DESCRIPTOR_VERSION_INVALID) {
+            const FLASH_DESCRIPTOR_VERSION* version = (const FLASH_DESCRIPTOR_VERSION*)&descriptorMap->DescriptorVersion;
+            QString versionStr = tr("Flash descriptor version: %1.%2").arg(version->Major).arg(version->Minor);
+            if (version->Major != FLASH_DESCRIPTOR_VERSION_MAJOR || version->Minor != FLASH_DESCRIPTOR_VERSION_MINOR) {
+                versionStr += tr(", unknown");
+                msg(tr("parseIntelImage: unknown flash descriptor version %1.%2").arg(version->Major).arg(version->Minor));
+            }
+            info = versionStr + "\n" + info;
+        }
     }
 
     // VSCC table
@@ -854,7 +859,7 @@ UINT8 FfsEngine::parseBios(const QByteArray & bios, const QModelIndex & parent)
         }
         else if (volumeHeader->Revision == 2) {
             // Acquire alignment
-            alignment = (UINT32)pow(2.0, (int)(volumeHeader->Attributes & EFI_FVB2_ALIGNMENT) >> 16);
+            alignment = (UINT32)(1UL << ((volumeHeader->Attributes & EFI_FVB2_ALIGNMENT) >> 16));
 
             // Check alignment
             if (volumeOffset % alignment)
@@ -877,9 +882,8 @@ UINT8 FfsEngine::parseBios(const QByteArray & bios, const QModelIndex & parent)
         if (msgUnknownRevision)
             msg(tr("parseBios: unknown volume revision %1").arg(volumeHeader->Revision), index);
         if (msgSizeMismach)
-            msg(tr("parseBios: volume size stored in header %1h (%2) differs from calculated using block map %3h (%4)")
-            .hexarg(volumeSize).arg(volumeSize)
-            .hexarg(bmVolumeSize).arg(bmVolumeSize),
+            msg(tr("parseBios: volume size stored in header %1h differs from calculated using block map %2h")
+            .hexarg(volumeSize).arg(bmVolumeSize),
             index);
 
         // Go to next volume
@@ -983,15 +987,16 @@ UINT8  FfsEngine::parseVolume(const QByteArray & volume, QModelIndex & index, co
     else
         headerSize = volumeHeader->HeaderLength;
 
-    // Sanity check after some new crazy MSI images
+    // Sanity check after some crazy MSI images
     headerSize = ALIGN8(headerSize);
 
-    // Check for volume structure to be known
-    bool volumeIsUnknown = true;
-
-    // Check for FFS v2 volume
-    if (FFSv2Volumes.contains(QByteArray::fromRawData((const char*)volumeHeader->FileSystemGuid.Data, sizeof(EFI_GUID)))) {
-        volumeIsUnknown = false;
+    // Check for FFS v2/v3 volume
+	UINT8 subtype = Subtypes::UnknownVolume;
+    if (FFSv2Volumes.contains(QByteArray::fromRawData((const char*)volumeHeader->FileSystemGuid.Data, sizeof(EFI_GUID)))){
+		subtype = Subtypes::Ffs2Volume;
+	}
+	else if (FFSv3Volumes.contains(QByteArray::fromRawData((const char*)volumeHeader->FileSystemGuid.Data, sizeof(EFI_GUID)))) {
+        subtype = Subtypes::Ffs3Volume;
     }
 
     // Check attributes
@@ -1063,10 +1068,10 @@ UINT8  FfsEngine::parseVolume(const QByteArray & volume, QModelIndex & index, co
     // Add tree item
     QByteArray  header = volume.left(headerSize);
     QByteArray  body = volume.mid(headerSize, volumeSize - headerSize);
-    index = model->addItem(Types::Volume, volumeIsUnknown ? Subtypes::UnknownVolume : Subtypes::Ffs2Volume, COMPRESSION_ALGORITHM_NONE, name, text, info, header, body, parent, mode);
+    index = model->addItem(Types::Volume, subtype, COMPRESSION_ALGORITHM_NONE, name, text, info, header, body, parent, mode);
 
     // Show messages
-    if (volumeIsUnknown) {
+    if (subtype == Subtypes::UnknownVolume) {
         msg(tr("parseVolume: unknown file system %1").arg(guidToQString(volumeHeader->FileSystemGuid)), index);
         // Do not parse unknown volumes
         return ERR_SUCCESS;
@@ -1100,19 +1105,42 @@ UINT8  FfsEngine::parseVolume(const QByteArray & volume, QModelIndex & index, co
             break;
         }
 
-        result = getFileSize(volume, fileOffset, fileSize);
-        if (result)
-            return result;
+        QByteArray tempFile = volume.mid(fileOffset, sizeof(EFI_FFS_FILE_HEADER));
+        const EFI_FFS_FILE_HEADER* tempFileHeader = (const EFI_FFS_FILE_HEADER*)tempFile.constData();
+        UINT32 fileHeaderSize = sizeof(EFI_FFS_FILE_HEADER);
+        fileSize = uint24ToUint32(tempFileHeader->Size);
+        if (volumeHeader->Revision > 1 && (tempFileHeader->Attributes & FFS_ATTRIB_LARGE_FILE)) {
+            // Check if it's possibly the latest file in the volume
+            if (volumeSize - fileOffset < sizeof(EFI_FFS_FILE_HEADER2)) {
+                // No files are possible after this point
+                // All the rest is either free space or non-UEFI data
+                QByteArray rest = volume.right(volumeSize - fileOffset);
+                if (rest.count(empty) == rest.size()) { // It's a free space
+                    model->addItem(Types::FreeSpace, 0, COMPRESSION_ALGORITHM_NONE, tr("Volume free space"), "", tr("Full size: %1h (%2)").hexarg(rest.size()).arg(rest.size()), QByteArray(), rest, index);
+                }
+                else { //It's non-UEFI data
+                    QModelIndex dataIndex = model->addItem(Types::Padding, Subtypes::DataPadding, COMPRESSION_ALGORITHM_NONE, tr("Non-UEFI data"), "", tr("Full size: %1h (%2)").hexarg(rest.size()).arg(rest.size()), QByteArray(), rest, index);
+                    msg(tr("parseVolume: non-UEFI data found in volume's free space"), dataIndex);
+                }
+                // Exit from loop
+                break;
+            }
 
-        // Check file size to be at least size of EFI_FFS_FILE_HEADER
-        if (fileSize < sizeof(EFI_FFS_FILE_HEADER)) {
+            fileHeaderSize = sizeof(EFI_FFS_FILE_HEADER2);
+            tempFile = volume.mid(fileOffset, sizeof(EFI_FFS_FILE_HEADER2));
+            const EFI_FFS_FILE_HEADER2* tempFileHeader2 = (const EFI_FFS_FILE_HEADER2*)tempFile.constData();
+            fileSize = (UINT32)tempFileHeader2->ExtendedSize;
+        }
+
+        // Check file size to be at least size of the header
+        if (fileSize < fileHeaderSize) {
             msg(tr("parseVolume: volume has FFS file with invalid size"), index);
             return ERR_INVALID_FILE;
         }
-
+       
         QByteArray file = volume.mid(fileOffset, fileSize);
-        QByteArray header = file.left(sizeof(EFI_FFS_FILE_HEADER));
-
+        QByteArray header = file.left(fileHeaderSize);
+        
         // If we are at empty space in the end of volume
         if (header.count(empty) == header.size()) {
             // Check free space to be actually free
@@ -1152,8 +1180,11 @@ UINT8  FfsEngine::parseVolume(const QByteArray & volume, QModelIndex & index, co
         // Check file alignment
         const EFI_FFS_FILE_HEADER* fileHeader = (const EFI_FFS_FILE_HEADER*)header.constData();
         UINT8 alignmentPower = ffsAlignmentTable[(fileHeader->Attributes & FFS_ATTRIB_DATA_ALIGNMENT) >> 3];
-        UINT32 alignment = (UINT32)pow(2.0, alignmentPower);
-        if ((fileOffset + sizeof(EFI_FFS_FILE_HEADER)) % alignment)
+        if (volumeHeader->Revision > 1 && (fileHeader->Attributes & FFS_ATTRIB_DATA_ALIGNMENT2))
+            alignmentPower = ffsAlignment2Table[(fileHeader->Attributes & FFS_ATTRIB_DATA_ALIGNMENT) >> 3];
+
+        UINT32 alignment = (UINT32)(1UL << alignmentPower);
+        if ((fileOffset + fileHeaderSize) % alignment)
             msgUnalignedFile = true;
 
         // Check file GUID
@@ -1165,7 +1196,7 @@ UINT8  FfsEngine::parseVolume(const QByteArray & volume, QModelIndex & index, co
 
         // Parse file
         QModelIndex fileIndex;
-        result = parseFile(file, fileIndex, empty == '\xFF' ? ERASE_POLARITY_TRUE : ERASE_POLARITY_FALSE, index);
+        result = parseFile(file, fileIndex, volumeHeader->Revision, empty == '\xFF' ? ERASE_POLARITY_TRUE : ERASE_POLARITY_FALSE, index);
         if (result && result != ERR_VOLUMES_NOT_FOUND && result != ERR_INVALID_VOLUME)
             msg(tr("parseVolume: FFS file parsing failed with error \"%1\"").arg(errorMessage(result)), index);
 
@@ -1183,16 +1214,7 @@ UINT8  FfsEngine::parseVolume(const QByteArray & volume, QModelIndex & index, co
     return ERR_SUCCESS;
 }
 
-UINT8 FfsEngine::getFileSize(const QByteArray & volume, const UINT32 fileOffset, UINT32 & fileSize)
-{
-    if ((UINT32)volume.size() < fileOffset + sizeof(EFI_FFS_FILE_HEADER))
-        return ERR_INVALID_VOLUME;
-    const EFI_FFS_FILE_HEADER* fileHeader = (const EFI_FFS_FILE_HEADER*)(volume.constData() + fileOffset);
-    fileSize = uint24ToUint32(fileHeader->Size);
-    return ERR_SUCCESS;
-}
-
-UINT8 FfsEngine::parseFile(const QByteArray & file, QModelIndex & index, const UINT8 erasePolarity, const QModelIndex & parent, const UINT8 mode)
+UINT8 FfsEngine::parseFile(const QByteArray & file, QModelIndex & index, const UINT8 revision, const UINT8 erasePolarity, const QModelIndex & parent, const UINT8 mode)
 {
     bool msgInvalidHeaderChecksum = false;
     bool msgInvalidDataChecksum = false;
@@ -1200,43 +1222,32 @@ UINT8 FfsEngine::parseFile(const QByteArray & file, QModelIndex & index, const U
     bool msgInvalidType = false;
 
     // Populate file header
+    if ((UINT32)file.size() < sizeof(EFI_FFS_FILE_HEADER))
+        return ERR_INVALID_FILE;
     const EFI_FFS_FILE_HEADER* fileHeader = (const EFI_FFS_FILE_HEADER*)file.constData();
 
-    // Check file state
     // Construct empty byte for this file
     char empty = erasePolarity ? '\xFF' : '\x00';
 
-    // Check header checksum
+    // Get file header
     QByteArray header = file.left(sizeof(EFI_FFS_FILE_HEADER));
-    QByteArray tempHeader = header;
-    EFI_FFS_FILE_HEADER* tempFileHeader = (EFI_FFS_FILE_HEADER*)(tempHeader.data());
-    tempFileHeader->IntegrityCheck.Checksum.Header = 0;
-    tempFileHeader->IntegrityCheck.Checksum.File = 0;
-    UINT8 calculated = calculateChecksum8((const UINT8*)tempFileHeader, sizeof(EFI_FFS_FILE_HEADER) - 1);
-    if (fileHeader->IntegrityCheck.Checksum.Header != calculated)
+    if (revision > 1 && (fileHeader->Attributes & FFS_ATTRIB_LARGE_FILE)) {
+        if ((UINT32)file.size() < sizeof(EFI_FFS_FILE_HEADER2))
+            return ERR_INVALID_FILE;
+        header = file.left(sizeof(EFI_FFS_FILE_HEADER2));
+    }
+
+    // Check header checksum
+    UINT8 calculatedHeader = 0x100 - (calculateSum8((const UINT8*)header.constData(), header.size()) - fileHeader->IntegrityCheck.Checksum.Header - fileHeader->IntegrityCheck.Checksum.File - fileHeader->State);
+    if (fileHeader->IntegrityCheck.Checksum.Header != calculatedHeader)
         msgInvalidHeaderChecksum = true;
 
-    // Check data checksum
-    // Data checksum must be calculated
-    if (fileHeader->Attributes & FFS_ATTRIB_CHECKSUM) {
-        UINT32 bufferSize = file.size() - sizeof(EFI_FFS_FILE_HEADER);
-        // Exclude file tail from data checksum calculation
-        if (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT)
-            bufferSize -= sizeof(UINT16);
-        calculated = calculateChecksum8((const UINT8*)(file.constData() + sizeof(EFI_FFS_FILE_HEADER)), bufferSize);
-        if (fileHeader->IntegrityCheck.Checksum.File != calculated)
-            msgInvalidDataChecksum = true;
-    }
-    // Data checksum must be one of predefined values
-    else if (fileHeader->IntegrityCheck.Checksum.File != FFS_FIXED_CHECKSUM && fileHeader->IntegrityCheck.Checksum.File != FFS_FIXED_CHECKSUM2)
-        msgInvalidDataChecksum = true;
-
     // Get file body
-    QByteArray body = file.right(file.size() - sizeof(EFI_FFS_FILE_HEADER));
+    QByteArray body = file.mid(header.size());
+
     // Check for file tail presence
     QByteArray tail;
-    if (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT)
-    {
+    if (revision == 1 && fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT) {
         //Check file tail;
         tail = body.right(sizeof(UINT16));
         UINT16 tailValue = *(UINT16*)tail.constData();
@@ -1247,48 +1258,51 @@ UINT8 FfsEngine::parseFile(const QByteArray & file, QModelIndex & index, const U
         body = body.left(body.size() - sizeof(UINT16));
     }
 
+    // Check data checksum
+    // Data checksum must be calculated
+    UINT8 calculatedData = 0;
+    if (fileHeader->Attributes & FFS_ATTRIB_CHECKSUM) {
+        calculatedData = calculateChecksum8((const UINT8*)body.constData(), body.size());
+    }
+    // Data checksum must be one of predefined values
+    else if (revision == 1) {
+        calculatedData = FFS_FIXED_CHECKSUM;
+    }
+    else {
+        calculatedData = FFS_FIXED_CHECKSUM2;
+    }
+
+    if (fileHeader->IntegrityCheck.Checksum.File != calculatedData)
+        msgInvalidDataChecksum = true;
+
     // Parse current file by default
-    bool parseCurrentFile = true;
+    bool parseCurrentFile = false;
     bool parseAsBios = false;
 
     // Check file type
-    switch (fileHeader->Type)
-    {
+    switch (fileHeader->Type) {
     case EFI_FV_FILETYPE_ALL:
-        parseAsBios = true;
-        break;
     case EFI_FV_FILETYPE_RAW:
         parseAsBios = true;
-        break;
     case EFI_FV_FILETYPE_FREEFORM:
-        break;
     case EFI_FV_FILETYPE_SECURITY_CORE:
-        break;
     case EFI_FV_FILETYPE_PEI_CORE:
-        break;
     case EFI_FV_FILETYPE_DXE_CORE:
-        break;
     case EFI_FV_FILETYPE_PEIM:
-        break;
     case EFI_FV_FILETYPE_DRIVER:
-        break;
     case EFI_FV_FILETYPE_COMBINED_PEIM_DRIVER:
-        break;
     case EFI_FV_FILETYPE_APPLICATION:
-        break;
     case EFI_FV_FILETYPE_SMM:
-        break;
     case EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE:
-        break;
     case EFI_FV_FILETYPE_COMBINED_SMM_DXE:
-        break;
     case EFI_FV_FILETYPE_SMM_CORE:
-        break;
+	case EFI_FV_FILETYPE_SMM_STANDALONE:
+    case EFI_FV_FILETYPE_SMM_CORE_STANDALONE:
     case EFI_FV_FILETYPE_PAD:
+        parseCurrentFile = true;
         break;
     default:
         msgInvalidType = true;
-        parseCurrentFile = false;
     };
 
     // Check for empty file
@@ -1310,25 +1324,27 @@ UINT8 FfsEngine::parseFile(const QByteArray & file, QModelIndex & index, const U
     else
         name = parseAsNonEmptyPadFile ? tr("Non-empty pad-file") : tr("Pad-file");
 
-    info = tr("File GUID: %1\nType: %2h\nAttributes: %3h\nFull size: %4h (%5)\nHeader size: %6h (%7)\nBody size: %8h (%9)\nState: %10h")
+    info = tr("File GUID: %1\nType: %2h\nAttributes: %3h\nFull size: %4h (%5)\nHeader size: %6h (%7)\nBody size: %8h (%9)\nState: %10h\nHeader checksum: %11h\nData checksum: %12h")
         .arg(guidToQString(fileHeader->Name))
         .hexarg2(fileHeader->Type, 2)
         .hexarg2(fileHeader->Attributes, 2)
         .hexarg(header.size() + body.size() + tail.size()).arg(header.size() + body.size() + tail.size())
         .hexarg(header.size()).arg(header.size())
         .hexarg(body.size()).arg(body.size())
-        .hexarg2(fileHeader->State, 2);
+        .hexarg2(fileHeader->State, 2)
+        .hexarg2(fileHeader->IntegrityCheck.Checksum.Header, 2)
+        .hexarg2(fileHeader->IntegrityCheck.Checksum.File, 2);
 
     // Add tree item
     index = model->addItem(Types::File, fileHeader->Type, COMPRESSION_ALGORITHM_NONE, name, "", info, header, body, parent, mode);
 
     // Show messages
     if (msgInvalidHeaderChecksum)
-        msg(tr("parseFile: invalid header checksum"), index);
+        msg(tr("parseFile: invalid header checksum %1h, should be %2h").hexarg2(fileHeader->IntegrityCheck.Checksum.Header, 2).hexarg2(calculatedHeader, 2), index);
     if (msgInvalidDataChecksum)
-        msg(tr("parseFile: invalid data checksum"), index);
+        msg(tr("parseFile: invalid data checksum %1h, should be %2h").hexarg2(fileHeader->IntegrityCheck.Checksum.File, 2).hexarg2(calculatedData, 2), index);
     if (msgInvalidTailValue)
-        msg(tr("parseFile: invalid tail value"), index);
+        msg(tr("parseFile: invalid tail value %1h").hexarg(*(UINT16*)tail.data()), index);
     if (msgInvalidType)
         msg(tr("parseFile: unknown file type %1h").arg(fileHeader->Type, 2), index);
 
@@ -1382,8 +1398,18 @@ UINT8 FfsEngine::getSectionSize(const QByteArray & file, const UINT32 sectionOff
 {
     if ((UINT32)file.size() < sectionOffset + sizeof(EFI_COMMON_SECTION_HEADER))
         return ERR_INVALID_FILE;
+	
     const EFI_COMMON_SECTION_HEADER* sectionHeader = (const EFI_COMMON_SECTION_HEADER*)(file.constData() + sectionOffset);
     sectionSize = uint24ToUint32(sectionHeader->Size);
+    // This may introduce a very rare error with a non-extended section of size equal to 0xFFFFFF
+	if (sectionSize != 0xFFFFFF)
+        return ERR_SUCCESS;
+ 
+    if ((UINT32)file.size() < sectionOffset + sizeof(EFI_COMMON_SECTION_HEADER2))
+        return ERR_INVALID_FILE;
+
+    const EFI_COMMON_SECTION_HEADER2* sectionHeader2 = (const EFI_COMMON_SECTION_HEADER2*)(file.constData() + sectionOffset);
+    sectionSize = sectionHeader2->ExtendedSize;	  
     return ERR_SUCCESS;
 }
 
@@ -1536,7 +1562,7 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     QString info;
     QByteArray header;
     QByteArray body;
-    UINT32 headerSize;
+    UINT32 headerSize = sizeOfSectionHeader(sectionHeader);
     UINT8 result;
 
     switch (sectionHeader->Type) {
@@ -1547,8 +1573,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
         QByteArray decompressed;
         UINT8 algorithm;
         const EFI_COMPRESSION_SECTION* compressedSectionHeader = (const EFI_COMPRESSION_SECTION*)sectionHeader;
-        header = section.left(sizeof(EFI_COMPRESSION_SECTION));
-        body = section.mid(sizeof(EFI_COMPRESSION_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
         algorithm = COMPRESSION_ALGORITHM_UNKNOWN;
         // Decompress section
         result = decompress(body, compressedSectionHeader->CompressionType, decompressed, &algorithm);
@@ -1564,8 +1590,16 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
             .arg(compressionTypeToQString(algorithm))
             .hexarg(compressedSectionHeader->UncompressedLength).arg(compressedSectionHeader->UncompressedLength);
 
+        UINT32 dictionarySize = DEFAULT_LZMA_DICTIONARY_SIZE;
+        if (algorithm == COMPRESSION_ALGORITHM_LZMA) {
+            // Dictionary size is stored in bytes 1-4 of LZMA-compressed data
+            dictionarySize = *(UINT32*)(body.constData() + 1);
+            info += tr("\nLZMA dictionary size: %1h").hexarg(dictionarySize);
+        }
+
         // Add tree item
         index = model->addItem(Types::Section, sectionHeader->Type, algorithm, name, "", info, header, body, parent, mode);
+        model->setDictionarySize(index, dictionarySize);
 
         // Show message
         if (!parseCurrentSection)
@@ -1588,12 +1622,10 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
         bool msgUnknownSignature = false;
         bool msgUnknownUefiGuidSignature = false;
 
-        const EFI_GUID_DEFINED_SECTION* guidDefinedSectionHeader;
-        header = section.left(sizeof(EFI_GUID_DEFINED_SECTION));
-        guidDefinedSectionHeader = (const EFI_GUID_DEFINED_SECTION*)(header.constData());
-        header = section.left(guidDefinedSectionHeader->DataOffset);
-        guidDefinedSectionHeader = (const EFI_GUID_DEFINED_SECTION*)(header.constData());
-        body = section.mid(guidDefinedSectionHeader->DataOffset);
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
+ 
+        const EFI_GUID_DEFINED_SECTION* guidDefinedSectionHeader = (const EFI_GUID_DEFINED_SECTION*)(header.constData());
         QByteArray processed = body;
 
         // Get info
@@ -1608,6 +1640,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
             .hexarg2(guidDefinedSectionHeader->Attributes, 4);
 
         UINT8 algorithm = COMPRESSION_ALGORITHM_NONE;
+        UINT32 dictionarySize = DEFAULT_LZMA_DICTIONARY_SIZE;
+
         // Check if section requires processing
         if (guidDefinedSectionHeader->Attributes & EFI_GUIDED_SECTION_PROCESSING_REQUIRED) {
             // Tiano compressed section
@@ -1640,6 +1674,10 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
                 if (algorithm == COMPRESSION_ALGORITHM_LZMA) {
                     info += tr("\nCompression type: LZMA");
                     info += tr("\nDecompressed size: %1h (%2)").hexarg(processed.length()).arg(processed.length());
+
+                    // Dictionary size is stored in bytes 1-4 of LZMA-compressed data
+                    dictionarySize = *(UINT32*)(body.constData() + 1);
+                    info += tr("\nLZMA dictionary size: %1h").hexarg(dictionarySize);
                 }
                 else
                     info += tr("\nCompression type: unknown");
@@ -1670,7 +1708,7 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
                     }
                 }
                 else if (certificateHeader->CertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA) {
-                    info += tr("\nSignature type: PCKS7");
+                    info += tr("\nSignature type: PKCS7");
                     // TODO: show signature info in Information panel
                 }
                 else {
@@ -1719,6 +1757,7 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
 
         // Add tree item
         index = model->addItem(Types::Section, sectionHeader->Type, algorithm, name, "", info, header, body, parent, mode);
+        model->setDictionarySize(index, dictionarySize);
 
         // Show messages
         if (msgUnknownGuid)
@@ -1748,8 +1787,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
 
     case EFI_SECTION_DISPOSABLE:
     {
-        header = section.left(sizeof(EFI_DISPOSABLE_SECTION));
-        body = section.mid(sizeof(EFI_DISPOSABLE_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
 
         // Get info
         info = tr("Type: %1h\nFull size: %2h (%3)\nHeader size: %4h (%5)\nBody size: %6h (%7)")
@@ -1772,7 +1811,6 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     case EFI_SECTION_PEI_DEPEX:
     case EFI_SECTION_SMM_DEPEX: {
         bool msgDepexParseFailed = false;
-        headerSize = sizeOfSectionHeader(sectionHeader);
         header = section.left(headerSize);
         body = section.mid(headerSize);
 
@@ -1800,7 +1838,6 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     case EFI_SECTION_TE: {
-        headerSize = sizeOfSectionHeader(sectionHeader);
         header = section.left(headerSize);
         body = section.mid(headerSize);
 
@@ -1814,7 +1851,11 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
         // Get TE info
         bool msgInvalidSignature = false;
         const EFI_IMAGE_TE_HEADER* teHeader = (const EFI_IMAGE_TE_HEADER*)body.constData();
-        UINT32 teFixup = teHeader->StrippedSize - sizeof(EFI_IMAGE_TE_HEADER);
+        
+        // Most EFI images today include teFixup in ImageBase value,
+        // which doesn't follow the UEFI spec, but is so popular that
+        // only a few images out of thousands are different
+        UINT32 teFixup = 0; //teHeader->StrippedSize - sizeof(EFI_IMAGE_TE_HEADER);
         if (teHeader->Signature != EFI_IMAGE_TE_SIGNATURE) {
             info += tr("\nSignature: %1h, invalid").hexarg2(teHeader->Signature, 4);
             msgInvalidSignature = true;
@@ -1851,7 +1892,6 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
 
     case EFI_SECTION_PE32:
     case EFI_SECTION_PIC: {
-        headerSize = sizeOfSectionHeader(sectionHeader);
         header = section.left(headerSize);
         body = section.mid(headerSize);
 
@@ -1947,7 +1987,6 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     case EFI_SECTION_COMPATIBILITY16: {
-        headerSize = sizeOfSectionHeader(sectionHeader);
         header = section.left(headerSize);
         body = section.mid(headerSize);
 
@@ -1963,8 +2002,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     case EFI_SECTION_FREEFORM_SUBTYPE_GUID: {
-        header = section.left(sizeof(EFI_FREEFORM_SUBTYPE_GUID_SECTION));
-        body = section.mid(sizeof(EFI_FREEFORM_SUBTYPE_GUID_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
 
         const EFI_FREEFORM_SUBTYPE_GUID_SECTION* fsgHeader = (const EFI_FREEFORM_SUBTYPE_GUID_SECTION*)sectionHeader;
         // Get info
@@ -1983,8 +2022,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     case EFI_SECTION_VERSION: {
-        header = section.left(sizeof(EFI_VERSION_SECTION));
-        body = section.mid(sizeof(EFI_VERSION_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
 
         const EFI_VERSION_SECTION* versionHeader = (const EFI_VERSION_SECTION*)sectionHeader;
 
@@ -2002,8 +2041,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     case EFI_SECTION_USER_INTERFACE: {
-        header = section.left(sizeof(EFI_USER_INTERFACE_SECTION));
-        body = section.mid(sizeof(EFI_USER_INTERFACE_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
         QString text = QString::fromUtf16((const ushort*)body.constData());
 
         // Get info
@@ -2022,8 +2061,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     case EFI_SECTION_FIRMWARE_VOLUME_IMAGE: {
-        header = section.left(sizeof(EFI_FIRMWARE_VOLUME_IMAGE_SECTION));
-        body = section.mid(sizeof(EFI_FIRMWARE_VOLUME_IMAGE_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
 
         // Get info
         info = tr("Type: %1h\nFull size: %2h (%3)\nHeader size: %4h (%5)\nBody size: %6h (%7)")
@@ -2045,8 +2084,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
 
     case EFI_SECTION_RAW: {
         bool parsed = false;
-        header = section.left(sizeof(EFI_RAW_SECTION));
-        body = section.mid(sizeof(EFI_RAW_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
 
         // Get info
         info = tr("Type: %1h\nFull size: %2h (%3)\nHeader size: %4h (%5)\nBody size: %6h (%7)")
@@ -2100,8 +2139,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
 
     case SCT_SECTION_POSTCODE:
     case INSYDE_SECTION_POSTCODE: {
-        header = section.left(sizeof(POSTCODE_SECTION));
-        body = section.mid(sizeof(POSTCODE_SECTION));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
 
         const POSTCODE_SECTION* postcodeHeader = (const POSTCODE_SECTION*)sectionHeader;
 
@@ -2118,8 +2157,8 @@ UINT8 FfsEngine::parseSection(const QByteArray & section, QModelIndex & index, c
     } break;
 
     default:
-        header = section.left(sizeof(EFI_COMMON_SECTION_HEADER));
-        body = section.mid(sizeof(EFI_COMMON_SECTION_HEADER));
+        header = section.left(headerSize);
+        body = section.mid(headerSize);
         // Get info
         info = tr("Type: %1h\nFull size: %2h (%3)\nHeader size: %4h (%5)\nBody size: %6h (%7)")
             .hexarg2(sectionHeader->Type, 2)
@@ -2140,6 +2179,7 @@ UINT8 FfsEngine::create(const QModelIndex & index, const UINT8 type, const QByte
     QByteArray created;
     UINT8 result;
     QModelIndex fileIndex;
+    UINT32 defaultDictionarySize = DEFAULT_LZMA_DICTIONARY_SIZE;
 
     if (!index.isValid() || !index.parent().isValid())
         return ERR_INVALID_PARAMETER;
@@ -2219,28 +2259,51 @@ UINT8 FfsEngine::create(const QModelIndex & index, const UINT8 type, const QByte
         if (header.size() != sizeof(EFI_FFS_FILE_HEADER))
             return ERR_INVALID_FILE;
 
-        QByteArray newHeader = header;
-        QByteArray newBody = body;
-        EFI_FFS_FILE_HEADER* fileHeader = (EFI_FFS_FILE_HEADER*)newHeader.data();
+        QByteArray newObject = header + body;
+        EFI_FFS_FILE_HEADER* fileHeader = (EFI_FFS_FILE_HEADER*)newObject.data();
+
+        // Determine correct file header size
+        bool largeFile = false;
+        UINT32 headerSize = sizeof(EFI_FFS_FILE_HEADER);
+        if (revision > 1 && (fileHeader->Attributes & FFS_ATTRIB_LARGE_FILE)) {
+            largeFile = true;
+            headerSize = sizeof(EFI_FFS_FILE_HEADER2);
+        }
+
+        QByteArray newHeader = newObject.left(headerSize);
+        QByteArray newBody = newObject.mid(headerSize);
 
         // Check if the file has a tail
-        UINT8 tailSize = fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT ? sizeof(UINT16) : 0;
+        UINT8 tailSize = (revision == 1 && (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT)) ? sizeof(UINT16) : 0;
         if (tailSize) {
             // Remove the tail, it will then be added back for revision 1 volumes
             newBody = newBody.left(newBody.size() - tailSize);
-            // Remove the attribute for rev2+ volumes
-            if (revision != 1) {
-                fileHeader->Attributes &= ~(FFS_ATTRIB_TAIL_PRESENT);
-            }
         }
 
         // Correct file size
-        uint32ToUint24(sizeof(EFI_FFS_FILE_HEADER) + newBody.size() + tailSize, fileHeader->Size);
+        if (!largeFile) {
+            if (newBody.size() >= 0xFFFFFF) {
+                return ERR_INVALID_FILE;
+            }
+
+            uint32ToUint24(headerSize + newBody.size() + tailSize, fileHeader->Size);
+        }
+        else {
+            uint32ToUint24(0xFFFFFF, fileHeader->Size);
+            EFI_FFS_FILE_HEADER2* fileHeader2 = (EFI_FFS_FILE_HEADER2*)newHeader.data();
+            fileHeader2->ExtendedSize = headerSize + newBody.size() + tailSize;
+        }
+
+        // Set file state
+        UINT8 state = EFI_FILE_DATA_VALID | EFI_FILE_HEADER_VALID | EFI_FILE_HEADER_CONSTRUCTION;
+        if (erasePolarity)
+            state = ~state;
+        fileHeader->State = state;
 
         // Recalculate header checksum
         fileHeader->IntegrityCheck.Checksum.Header = 0;
         fileHeader->IntegrityCheck.Checksum.File = 0;
-        fileHeader->IntegrityCheck.Checksum.Header = calculateChecksum8((const UINT8*)fileHeader, sizeof(EFI_FFS_FILE_HEADER) - 1);
+        fileHeader->IntegrityCheck.Checksum.Header = 0x100 - (calculateSum8((const UINT8*)newHeader.constData(), headerSize) - fileHeader->State);
 
         // Recalculate data checksum, if needed
         if (fileHeader->Attributes & FFS_ATTRIB_CHECKSUM)
@@ -2254,23 +2317,17 @@ UINT8 FfsEngine::create(const QModelIndex & index, const UINT8 type, const QByte
         created.append(newBody);
 
         // Append tail, if needed
-        if (revision ==1 && tailSize) {
+        if (revision == 1 && tailSize) {
             UINT8 ht = ~fileHeader->IntegrityCheck.Checksum.Header;
             UINT8 ft = ~fileHeader->IntegrityCheck.Checksum.File;
             created.append(ht).append(ft);
         }
 
-        // Set file state
-        UINT8 state = EFI_FILE_DATA_VALID | EFI_FILE_HEADER_VALID | EFI_FILE_HEADER_CONSTRUCTION;
-        if (erasePolarity)
-            state = ~state;
-        fileHeader->State = state;
-
         // Prepend header
         created.prepend(newHeader);
 
         // Parse file
-        result = parseFile(created, fileIndex, erasePolarity ? ERASE_POLARITY_TRUE : ERASE_POLARITY_FALSE, index, mode);
+        result = parseFile(created, fileIndex, revision, erasePolarity ? ERASE_POLARITY_TRUE : ERASE_POLARITY_FALSE, index, mode);
         if (result && result != ERR_VOLUMES_NOT_FOUND  && result != ERR_INVALID_VOLUME)
             return result;
 
@@ -2284,11 +2341,16 @@ UINT8 FfsEngine::create(const QModelIndex & index, const UINT8 type, const QByte
         if (model->type(parent) != Types::File && model->type(parent) != Types::Section)
             return ERR_INVALID_SECTION;
 
-        if (header.size() < (int) sizeof(EFI_COMMON_SECTION_HEADER))
+        if ((UINT32)header.size() < sizeof(EFI_COMMON_SECTION_HEADER))
             return ERR_INVALID_SECTION;
 
         QByteArray newHeader = header;
         EFI_COMMON_SECTION_HEADER* commonHeader = (EFI_COMMON_SECTION_HEADER*)newHeader.data();
+
+        if (uint24ToUint32(commonHeader->Size) == EFI_SECTION2_IS_USED) {
+            msg(tr("create: creation of large sections not supported yet"), index);
+            return ERR_NOT_IMPLEMENTED;
+        }
 
         switch (commonHeader->Type)
         {
@@ -2298,18 +2360,21 @@ UINT8 FfsEngine::create(const QModelIndex & index, const UINT8 type, const QByte
             sectionHeader->UncompressedLength = body.size();
 
             // Set compression type
-            if (algorithm == COMPRESSION_ALGORITHM_NONE)
+            if (algorithm == COMPRESSION_ALGORITHM_NONE) {
                 sectionHeader->CompressionType = EFI_NOT_COMPRESSED;
-            else if (algorithm == COMPRESSION_ALGORITHM_EFI11 || algorithm == COMPRESSION_ALGORITHM_TIANO)
+            }
+            else if (algorithm == COMPRESSION_ALGORITHM_EFI11 || algorithm == COMPRESSION_ALGORITHM_TIANO) {
                 sectionHeader->CompressionType = EFI_STANDARD_COMPRESSION;
-            else if (algorithm == COMPRESSION_ALGORITHM_LZMA || algorithm == COMPRESSION_ALGORITHM_IMLZMA)
+            }
+            else if (algorithm == COMPRESSION_ALGORITHM_LZMA || algorithm == COMPRESSION_ALGORITHM_IMLZMA) {
                 sectionHeader->CompressionType = EFI_CUSTOMIZED_COMPRESSION;
+            }
             else
                 return ERR_UNKNOWN_COMPRESSION_ALGORITHM;
 
             // Compress body
             QByteArray compressed;
-            result = compress(body, algorithm, compressed);
+            result = compress(body, algorithm, defaultDictionarySize, compressed);
             if (result)
                 return result;
 
@@ -2335,7 +2400,7 @@ UINT8 FfsEngine::create(const QModelIndex & index, const UINT8 type, const QByte
         case EFI_SECTION_GUID_DEFINED:{
             // Compress body
             QByteArray compressed;
-            result = compress(body, algorithm, compressed);
+            result = compress(body, algorithm, defaultDictionarySize, compressed);
             if (result)
                 return result;
 
@@ -2402,7 +2467,34 @@ void FfsEngine::rebasePeiFiles(const QModelIndex & index)
                 // If section stores PE32 or TE image
                 if (model->subtype(currentSectionIndex) == EFI_SECTION_PE32 || model->subtype(currentSectionIndex) == EFI_SECTION_TE)
                     // Set rebase action
-                    model->setAction(currentSectionIndex, Actions::Rebase);
+                    if (model->action(currentSectionIndex) != Actions::Remove)
+                        model->setAction(currentSectionIndex, Actions::Rebase);
+            }
+        }
+    }
+
+    // Rebase VTF in subsequent volumes.
+    QModelIndex parent = index.parent();
+    while (parent.isValid() && model->type(parent) != Types::Volume)
+        parent = parent.parent();
+    if (parent.isValid()) {
+        QModelIndex volumeContainer = parent.parent();
+        // Iterate over volumes starting from the one after.
+        for (int i = parent.row() + 1; i < model->rowCount(volumeContainer); i++) {
+            QModelIndex currentVolumeIndex = volumeContainer.child(i, 0);
+            // Iterate over files within each volume after the current one.
+            for (int j = 0; j < model->rowCount(currentVolumeIndex); j++) {
+                QModelIndex currentFileIndex = currentVolumeIndex.child(j, 0);
+                if (model->header(currentFileIndex).left(sizeof(EFI_GUID)) == EFI_FFS_VOLUME_TOP_FILE_GUID) {
+                    for (int k = 0; k < model->rowCount(currentFileIndex); k++) {
+                        QModelIndex currentSectionIndex = currentFileIndex.child(k, 0);
+                        // If section stores PE32 or TE image
+                        if (model->subtype(currentSectionIndex) == EFI_SECTION_PE32 || model->subtype(currentSectionIndex) == EFI_SECTION_TE)
+                            // Set rebase action
+                            if (model->action(currentSectionIndex) != Actions::Remove)
+                                model->setAction(currentSectionIndex, Actions::Rebase);
+                    }
+                }
             }
         }
     }
@@ -2428,16 +2520,19 @@ UINT8 FfsEngine::insert(const QModelIndex & index, const QByteArray & object, co
     }
     else if (model->type(parent) == Types::File) {
         type = Types::Section;
-        const EFI_COMMON_SECTION_HEADER* commonHeader = (EFI_COMMON_SECTION_HEADER*)object.constData();
+        const EFI_COMMON_SECTION_HEADER* commonHeader = (const EFI_COMMON_SECTION_HEADER*)object.constData();
         headerSize = sizeOfSectionHeader(commonHeader);
     }
     else if (model->type(parent) == Types::Section) {
         type = Types::Section;
-        const EFI_COMMON_SECTION_HEADER* commonHeader = (EFI_COMMON_SECTION_HEADER*)object.constData();
+        const EFI_COMMON_SECTION_HEADER* commonHeader = (const EFI_COMMON_SECTION_HEADER*)object.constData();
         headerSize = sizeOfSectionHeader(commonHeader);
     }
     else
         return ERR_NOT_IMPLEMENTED;
+
+    if ((UINT32)object.size() < headerSize)
+        return ERR_BUFFER_TOO_SMALL;
 
     return create(index, type, object.left(headerSize), object.right(object.size() - headerSize), mode, Actions::Insert);
 }
@@ -2518,9 +2613,15 @@ UINT8 FfsEngine::extract(const QModelIndex & index, QByteArray & extracted, cons
         extracted.append(model->header(index));
         extracted.append(model->body(index));
         if (model->type(index) == Types::File) {
-            //!TODO: add volume revision check, maybe?
+            UINT8 revision = 2;
+            QModelIndex parent = model->parent(index);
+            if (parent.isValid() && model->type(parent) == Types::Volume) {
+                const EFI_FIRMWARE_VOLUME_HEADER* volumeHeader = (const EFI_FIRMWARE_VOLUME_HEADER*)model->header(parent).constData();
+                revision = volumeHeader->Revision;
+            }
+
             const EFI_FFS_FILE_HEADER* fileHeader = (const EFI_FFS_FILE_HEADER*)model->header(index).constData();
-            if (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT) {
+            if (revision == 1 && fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT) {
                 UINT8 ht = ~fileHeader->IntegrityCheck.Checksum.Header;
                 UINT8 ft = ~fileHeader->IntegrityCheck.Checksum.File;
                 extracted.append(ht).append(ft);
@@ -2618,6 +2719,17 @@ UINT8 FfsEngine::rebuild(const QModelIndex & index)
     return ERR_SUCCESS;
 }
 
+UINT8 FfsEngine::doNotRebuild(const QModelIndex & index)
+{
+    if (!index.isValid())
+        return ERR_INVALID_PARAMETER;
+
+    // Set action for the item
+    model->setAction(index, Actions::DoNotRebuild);
+
+    return ERR_SUCCESS;
+}
+
 // Compression routines
 UINT8 FfsEngine::decompress(const QByteArray & compressedData, const UINT8 compressionType, QByteArray & decompressedData, UINT8 * algorithm)
 {
@@ -2674,7 +2786,13 @@ UINT8 FfsEngine::decompress(const QByteArray & compressedData, const UINT8 compr
         else if (algorithm)
             *algorithm = COMPRESSION_ALGORITHM_TIANO;
 
-        decompressedData = QByteArray((const char*)decompressed, decompressedSize);
+        if (decompressedSize > INT32_MAX) {
+            delete[] decompressed;
+            delete[] scratch;
+            return ERR_STANDARD_DECOMPRESSION_FAILED;
+        }
+
+        decompressedData = QByteArray((const char*)decompressed, (int)decompressedSize);
 
         delete[] decompressed;
         delete[] scratch;
@@ -2711,7 +2829,8 @@ UINT8 FfsEngine::decompress(const QByteArray & compressedData, const UINT8 compr
             }
 
             // Decompress section data again
-            if (ERR_SUCCESS != LzmaDecompress(data, dataSize, decompressed)) {
+            if (ERR_SUCCESS != LzmaDecompress(data, dataSize, decompressed)
+                || decompressedSize > INT32_MAX) {
                 if (algorithm)
                     *algorithm = COMPRESSION_ALGORITHM_UNKNOWN;
                 delete[] decompressed;
@@ -2720,13 +2839,17 @@ UINT8 FfsEngine::decompress(const QByteArray & compressedData, const UINT8 compr
             else {
                 if (algorithm)
                     *algorithm = COMPRESSION_ALGORITHM_IMLZMA;
-                decompressedData = QByteArray((const char*)decompressed, decompressedSize);
+                decompressedData = QByteArray((const char*)decompressed, (int)decompressedSize);
             }
         }
         else {
+            if (decompressedSize > INT32_MAX) {
+                delete[] decompressed;
+                return ERR_CUSTOMIZED_DECOMPRESSION_FAILED;
+            }
             if (algorithm)
                 *algorithm = COMPRESSION_ALGORITHM_LZMA;
-            decompressedData = QByteArray((const char*)decompressed, decompressedSize);
+            decompressedData = QByteArray((const char*)decompressed, (int)decompressedSize);
         }
 
         delete[] decompressed;
@@ -2739,7 +2862,7 @@ UINT8 FfsEngine::decompress(const QByteArray & compressedData, const UINT8 compr
     }
 }
 
-UINT8 FfsEngine::compress(const QByteArray & data, const UINT8 algorithm, QByteArray & compressedData)
+UINT8 FfsEngine::compress(const QByteArray & data, const UINT8 algorithm, const UINT32 dictionarySize, QByteArray & compressedData)
 {
     UINT8* compressed;
 
@@ -2829,10 +2952,10 @@ UINT8 FfsEngine::compress(const QByteArray & data, const UINT8 algorithm, QByteA
     case COMPRESSION_ALGORITHM_LZMA:
     {
         UINT32 compressedSize = 0;
-        if (LzmaCompress((const UINT8*)data.constData(), data.size(), NULL, &compressedSize) != ERR_BUFFER_TOO_SMALL)
+        if (LzmaCompress((const UINT8*)data.constData(), data.size(), NULL, &compressedSize, dictionarySize) != ERR_BUFFER_TOO_SMALL)
             return ERR_CUSTOMIZED_COMPRESSION_FAILED;
         compressed = new UINT8[compressedSize];
-        if (LzmaCompress((const UINT8*)data.constData(), data.size(), compressed, &compressedSize) != ERR_SUCCESS) {
+        if (LzmaCompress((const UINT8*)data.constData(), data.size(), compressed, &compressedSize, dictionarySize) != ERR_SUCCESS) {
             delete[] compressed;
             return ERR_CUSTOMIZED_COMPRESSION_FAILED;
         }
@@ -2849,10 +2972,10 @@ UINT8 FfsEngine::compress(const QByteArray & data, const UINT8 algorithm, QByteA
         UINT32 headerSize = sizeOfSectionHeader(sectionHeader);
         header = data.left(headerSize);
         QByteArray newData = data.mid(headerSize);
-        if (LzmaCompress((const UINT8*)newData.constData(), newData.size(), NULL, &compressedSize) != ERR_BUFFER_TOO_SMALL)
+        if (LzmaCompress((const UINT8*)newData.constData(), newData.size(), NULL, &compressedSize, dictionarySize) != ERR_BUFFER_TOO_SMALL)
             return ERR_CUSTOMIZED_COMPRESSION_FAILED;
         compressed = new UINT8[compressedSize];
-        if (LzmaCompress((const UINT8*)newData.constData(), newData.size(), compressed, &compressedSize) != ERR_SUCCESS) {
+        if (LzmaCompress((const UINT8*)newData.constData(), newData.size(), compressed, &compressedSize, dictionarySize) != ERR_SUCCESS) {
             delete[] compressed;
             return ERR_CUSTOMIZED_COMPRESSION_FAILED;
         }
@@ -2871,6 +2994,9 @@ UINT8 FfsEngine::compress(const QByteArray & data, const UINT8 algorithm, QByteA
 UINT8 FfsEngine::constructPadFile(const QByteArray &guid, const UINT32 size, const UINT8 revision, const UINT8 erasePolarity, QByteArray & pad)
 {
     if (size < sizeof(EFI_FFS_FILE_HEADER) || erasePolarity == ERASE_POLARITY_UNKNOWN)
+        return ERR_INVALID_PARAMETER;
+
+    if (size >= 0xFFFFFF) // TODO: large file support
         return ERR_INVALID_PARAMETER;
 
     pad = QByteArray(size - guid.size(), erasePolarity == ERASE_POLARITY_TRUE ? '\xFF' : '\x00');
@@ -2906,7 +3032,7 @@ UINT8 FfsEngine::reconstructIntelImage(const QModelIndex& index, QByteArray& rec
     UINT8 result;
 
     // No action
-    if (model->action(index) == Actions::NoAction) {
+    if (model->action(index) == Actions::NoAction || model->action(index) == Actions::DoNotRebuild) {
         reconstructed = model->header(index).append(model->body(index));
         return ERR_SUCCESS;
     }
@@ -2975,22 +3101,24 @@ UINT8 FfsEngine::reconstructIntelImage(const QModelIndex& index, QByteArray& rec
         UINT32 ecBegin = 0;
         UINT32 ecEnd = 0;
 
+        // Check for legacy descriptor version by getting hardcoded value of FlashParameters.ReadClockFrequency
+        UINT8 descriptorVersion = 2; // Skylake+ descriptor
         const FLASH_DESCRIPTOR_COMPONENT_SECTION* componentSection = (const FLASH_DESCRIPTOR_COMPONENT_SECTION*)calculateAddress8((const UINT8*)descriptor.constData(), descriptorMap->ComponentBase);
-        // Check descriptor version by getting hardcoded value of FlashParameters.ReadClockFrequency
-        UINT8 descriptorVersion = 0;
-        if (componentSection->FlashParameters.ReadClockFrequency == FLASH_FREQUENCY_20MHZ) {      // Old descriptor
+        if (componentSection->FlashParameters.ReadClockFrequency == FLASH_FREQUENCY_20MHZ) // Legacy descriptor
             descriptorVersion = 1;
+
+        if (descriptorVersion == 2 && descriptorMap->DescriptorVersion != FLASH_DESCRIPTOR_VERSION_INVALID) {
+            // Warn about incompatible version descriptor in case it is different.
+            const FLASH_DESCRIPTOR_VERSION *version = (const FLASH_DESCRIPTOR_VERSION *)&descriptorMap->DescriptorVersion;
+            if (version->Major != FLASH_DESCRIPTOR_VERSION_MAJOR || version->Minor != FLASH_DESCRIPTOR_VERSION_MINOR)
+                msg(tr("reconstructIntelImage: discovered unexpected %1.%2 descriptor version, trying to continue...")
+                    .arg(version->Major).arg(version->Minor));
         }
-        else if (componentSection->FlashParameters.ReadClockFrequency == FLASH_FREQUENCY_17MHZ) { // Skylake+ descriptor
-            descriptorVersion = 2;
+
+        if (descriptorVersion == 2) {
             ecBegin = calculateRegionOffset(regionSection->EcBase);
             ecEnd = ecBegin + calculateRegionSize(regionSection->EcBase, regionSection->EcLimit);
         }
-        else {
-            msg(tr("reconstructIntelImage: unknown descriptor version with ReadClockFrequency %1h").hexarg(componentSection->FlashParameters.ReadClockFrequency));
-            return ERR_INVALID_FLASH_DESCRIPTOR;
-        }
-
 
         UINT32 offset = descriptor.size();
         // Reconstruct other regions
@@ -3091,7 +3219,7 @@ UINT8 FfsEngine::reconstructRegion(const QModelIndex& index, QByteArray& reconst
     UINT8 result;
 
     // No action
-    if (model->action(index) == Actions::NoAction) {
+    if (model->action(index) == Actions::NoAction || model->action(index) == Actions::DoNotRebuild) {
         reconstructed = model->header(index).append(model->body(index));
         return ERR_SUCCESS;
     }
@@ -3148,7 +3276,7 @@ UINT8 FfsEngine::reconstructPadding(const QModelIndex& index, QByteArray& recons
         return ERR_SUCCESS;
 
     // No action
-    if (model->action(index) == Actions::NoAction) {
+    if (model->action(index) == Actions::NoAction || model->action(index) == Actions::DoNotRebuild) {
         reconstructed = model->body(index);
         return ERR_SUCCESS;
     }
@@ -3193,7 +3321,7 @@ UINT8 FfsEngine::reconstructVolume(const QModelIndex & index, QByteArray & recon
     UINT8 result;
 
     // No action
-    if (model->action(index) == Actions::NoAction) {
+    if (model->action(index) == Actions::NoAction || model->action(index) == Actions::DoNotRebuild) {
         reconstructed = model->header(index).append(model->body(index));
         return ERR_SUCCESS;
     }
@@ -3265,6 +3393,7 @@ UINT8 FfsEngine::reconstructVolume(const QModelIndex & index, QByteArray & recon
                         model->subtype(index.child(i, 0)) == EFI_FV_FILETYPE_COMBINED_PEIM_DRIVER)){
                         QModelIndex peiFile = index.child(i, 0);
                         UINT32 sectionOffset = sizeof(EFI_FFS_FILE_HEADER);
+                        // BUGBUG: this parsing is bad and doesn't support large files, but it needs to be performed only for very old images with uncompressed DXE volumes, so whatever
                         // Search for PE32 or TE section
                         for (int j = 0; j < model->rowCount(peiFile); j++) {
                             if (model->subtype(peiFile.child(j, 0)) == EFI_SECTION_PE32 ||
@@ -3330,19 +3459,26 @@ UINT8 FfsEngine::reconstructVolume(const QModelIndex & index, QByteArray & recon
                         continue;
 
                     EFI_FFS_FILE_HEADER* fileHeader = (EFI_FFS_FILE_HEADER*)file.data();
+                    UINT32 fileHeaderSize = sizeof(EFI_FFS_FILE_HEADER);
+                    if (volumeHeader->Revision > 1 && (fileHeader->Attributes & FFS_ATTRIB_LARGE_FILE))
+                        fileHeaderSize = sizeof(EFI_FFS_FILE_HEADER2);
 
                     // Pad file
                     if (fileHeader->Type == EFI_FV_FILETYPE_PAD) {
                         padFileGuid = file.left(sizeof(EFI_GUID));
 
+                        if (model->action(index.child(i, 0)) == Actions::DoNotRebuild) {
+                            // User asked not to touch this file, do nothing here
+                        }
                         // Parse non-empty pad file
-                        if (model->rowCount(index.child(i, 0))) {
-                            //TODO: handle it
+                        else if (model->rowCount(index.child(i, 0))) {
+                            // TODO: handle this special case
                             continue;
                         }
                         // Skip empty pad-file
-                        else
+                        else {
                             continue;
+                        }
                     }
 
                     // Volume Top File
@@ -3354,11 +3490,9 @@ UINT8 FfsEngine::reconstructVolume(const QModelIndex & index, QByteArray & recon
 
                     // Normal file
                     // Ensure correct alignment
-                    UINT8 alignmentPower;
-                    UINT32 alignmentBase;
-                    alignmentPower = ffsAlignmentTable[(fileHeader->Attributes & FFS_ATTRIB_DATA_ALIGNMENT) >> 3];
-                    alignment = (UINT32)pow(2.0, alignmentPower);
-                    alignmentBase = header.size() + offset + sizeof(EFI_FFS_FILE_HEADER);
+                    UINT8 alignmentPower = ffsAlignmentTable[(fileHeader->Attributes & FFS_ATTRIB_DATA_ALIGNMENT) >> 3];
+                    alignment = (UINT32)(1UL <<alignmentPower);
+                    UINT32 alignmentBase = header.size() + offset + fileHeaderSize;
                     if (alignmentBase % alignment) {
                         // File will be unaligned if added as is, so we must add pad file before it
                         // Determine pad file size
@@ -3496,17 +3630,20 @@ UINT8 FfsEngine::reconstructVolume(const QModelIndex & index, QByteArray & recon
                     volumeSize = newSize;
                 }
             }
-
-            // Check new volume size
-            if ((UINT32)(header.size() + reconstructed.size()) > volumeSize)
-            {
-                msg(tr("reconstructVolume: volume grow failed"), index);
-                return ERR_INVALID_VOLUME;
-            }
         }
         // Use current volume body
-        else
+        else {
             reconstructed = model->body(index);
+
+            // BUGBUG: volume size may change during this operation for volumes withour files in them
+            // but such volumes are fairly rare
+        }
+
+        // Check new volume size
+        if ((UINT32)(header.size() + reconstructed.size()) != volumeSize) {
+            msg(tr("reconstructVolume: volume size can't be changed"), index);
+            return ERR_INVALID_VOLUME;
+        }
 
         // Reconstruction successful
         reconstructed = header.append(reconstructed);
@@ -3527,6 +3664,7 @@ UINT8 FfsEngine::reconstructVolume(const QModelIndex & index, QByteArray & recon
                 volumeHeader->Checksum = calculateChecksum16((const UINT16*)volumeHeader, volumeHeader->HeaderLength);
             }
         }
+
         // Store new free space offset, if needed
         if (model->text(index).contains("AppleFSO ")) {
             // Get current CRC32 value from volume header
@@ -3557,7 +3695,7 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
     UINT8 result;
 
     // No action
-    if (model->action(index) == Actions::NoAction) {
+    if (model->action(index) == Actions::NoAction || model->action(index) == Actions::DoNotRebuild) {
         reconstructed = model->header(index).append(model->body(index));
         const EFI_FFS_FILE_HEADER* fileHeader = (const EFI_FFS_FILE_HEADER*)model->header(index).constData();
         // Append tail, if needed
@@ -3577,7 +3715,7 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
         model->action(index) == Actions::Rebuild) {
         QByteArray header = model->header(index);
         EFI_FFS_FILE_HEADER* fileHeader = (EFI_FFS_FILE_HEADER*)header.data();
-
+		
         // Check erase polarity
         if (erasePolarity == ERASE_POLARITY_UNKNOWN) {
             msg(tr("reconstructFile: unknown erase polarity"), index);
@@ -3585,9 +3723,9 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
         }
 
         // Check file state
-        // Invert it first if erase polarity is true
+        // Check top reserved bit of file state to determine it's original erase polarity
         UINT8 state = fileHeader->State;
-        if (erasePolarity == ERASE_POLARITY_TRUE)
+        if (state & EFI_FILE_ERASE_POLARITY)
             state = ~state;
 
         // Order of this checks must be preserved
@@ -3635,6 +3773,10 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
             // File contains sections
             else {
                 UINT32 offset = 0;
+                UINT32 headerSize = sizeof(EFI_FFS_FILE_HEADER);
+                if (revision > 1 && (fileHeader->Attributes & FFS_ATTRIB_LARGE_FILE)) {
+                    headerSize = sizeof(EFI_FFS_FILE_HEADER2);
+                }
 
                 for (int i = 0; i < model->rowCount(index); i++) {
                     // Align to 4 byte boundary
@@ -3646,8 +3788,22 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
                     }
 
                     // Calculate section base
-                    UINT32 sectionBase = base ? base + sizeof(EFI_FFS_FILE_HEADER) + offset : 0;
-
+                    UINT32 sectionBase = base ? base + headerSize + offset : 0;
+                    UINT8 alignmentPower = ffsAlignmentTable[(fileHeader->Attributes & FFS_ATTRIB_DATA_ALIGNMENT) >> 3];
+                    UINT32 fileAlignment = (UINT32)(1UL << alignmentPower);
+                    UINT32 alignmentBase = base + headerSize;
+                    if (alignmentBase % fileAlignment) {
+                        // File will be unaligned if added as is, so we must add pad file before it
+                        // Determine pad file size
+                        UINT32 size = fileAlignment - (alignmentBase % fileAlignment);
+                        // Required padding is smaller then minimal pad file size
+                        while (size < sizeof(EFI_FFS_FILE_HEADER)) {
+                            size += fileAlignment;
+                        }
+                        // Adjust file base to incorporate pad file that will be added to align it
+                        sectionBase += size;
+                    }
+                    
                     // Reconstruct section
                     QByteArray section;
                     result = reconstructSection(index.child(i, 0), sectionBase, section);
@@ -3665,20 +3821,30 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
                     offset += section.size();
                 }
             }
-
-            // Correct file size
-            UINT8 tailSize = (revision == 1 && (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT)) ? sizeof(UINT16) : 0;
-
-            uint32ToUint24(sizeof(EFI_FFS_FILE_HEADER) + reconstructed.size() + tailSize, fileHeader->Size);
-
-            // Recalculate header checksum
-            fileHeader->IntegrityCheck.Checksum.Header = 0;
-            fileHeader->IntegrityCheck.Checksum.File = 0;
-            fileHeader->IntegrityCheck.Checksum.Header = calculateChecksum8((const UINT8*)fileHeader, sizeof(EFI_FFS_FILE_HEADER) - 1);
         }
         // Use current file body
         else
             reconstructed = model->body(index);
+
+        // Correct file size
+        UINT8 tailSize = (revision == 1 && (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT)) ? sizeof(UINT16) : 0;
+        if (revision > 1 && (fileHeader->Attributes & FFS_ATTRIB_LARGE_FILE)) {
+            uint32ToUint24(EFI_SECTION2_IS_USED, fileHeader->Size);
+            EFI_FFS_FILE_HEADER2* fileHeader2 = (EFI_FFS_FILE_HEADER2*)fileHeader;
+            fileHeader2->ExtendedSize = sizeof(EFI_FFS_FILE_HEADER2) + reconstructed.size() + tailSize;
+        }
+        else {
+            if (sizeof(EFI_FFS_FILE_HEADER) + reconstructed.size() + tailSize > 0xFFFFFF) {
+                msg(tr("reconstructFile: resulting file size is too big"), index);
+                return ERR_INVALID_FILE;
+            }
+            uint32ToUint24(sizeof(EFI_FFS_FILE_HEADER) + reconstructed.size() + tailSize, fileHeader->Size);
+        }
+
+        // Recalculate header checksum
+        fileHeader->IntegrityCheck.Checksum.Header = 0;
+        fileHeader->IntegrityCheck.Checksum.File = 0;
+        fileHeader->IntegrityCheck.Checksum.Header = 0x100 - (calculateSum8((const UINT8*)header.constData(), header.size()) - fileHeader->State);
 
         // Recalculate data checksum, if needed
         if (fileHeader->Attributes & FFS_ATTRIB_CHECKSUM) {
@@ -3690,11 +3856,12 @@ UINT8 FfsEngine::reconstructFile(const QModelIndex& index, const UINT8 revision,
             fileHeader->IntegrityCheck.Checksum.File = FFS_FIXED_CHECKSUM2;
 
         // Append tail, if needed
-        if (fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT) {
+        if (revision == 1 && fileHeader->Attributes & FFS_ATTRIB_TAIL_PRESENT) {
             UINT8 ht = ~fileHeader->IntegrityCheck.Checksum.Header;
             UINT8 ft = ~fileHeader->IntegrityCheck.Checksum.File;
             reconstructed.append(ht).append(ft);
         }
+
         // Set file state
         state = EFI_FILE_DATA_VALID | EFI_FILE_HEADER_VALID | EFI_FILE_HEADER_CONSTRUCTION;
         if (erasePolarity == ERASE_POLARITY_TRUE)
@@ -3718,7 +3885,7 @@ UINT8 FfsEngine::reconstructSection(const QModelIndex& index, const UINT32 base,
     UINT8 result;
 
     // No action
-    if (model->action(index) == Actions::NoAction) {
+    if (model->action(index) == Actions::NoAction || model->action(index) == Actions::DoNotRebuild) {
         reconstructed = model->header(index).append(model->body(index));
         return ERR_SUCCESS;
     }
@@ -3732,6 +3899,10 @@ UINT8 FfsEngine::reconstructSection(const QModelIndex& index, const UINT32 base,
         model->action(index) == Actions::Rebase) {
         QByteArray header = model->header(index);
         EFI_COMMON_SECTION_HEADER* commonHeader = (EFI_COMMON_SECTION_HEADER*)header.data();
+        bool extended = false;
+        if (uint24ToUint32(commonHeader->Size) == 0xFFFFFF) {
+            extended = true;
+        }
 
         // Reconstruct section with children
         if (model->rowCount(index)) {
@@ -3771,20 +3942,28 @@ UINT8 FfsEngine::reconstructSection(const QModelIndex& index, const UINT32 base,
                 EFI_COMPRESSION_SECTION* compessionHeader = (EFI_COMPRESSION_SECTION*)header.data();
                 // Set new uncompressed size
                 compessionHeader->UncompressedLength = reconstructed.size();
-                // Compress new section body
-                QByteArray compressed;
-                result = compress(reconstructed, model->compression(index), compressed);
-                if (result)
-                    return result;
+
                 // Correct compression type
-                if (model->compression(index) == COMPRESSION_ALGORITHM_NONE)
+                if (model->compression(index) == COMPRESSION_ALGORITHM_NONE) {
                     compessionHeader->CompressionType = EFI_NOT_COMPRESSED;
-                else if (model->compression(index) == COMPRESSION_ALGORITHM_LZMA || model->compression(index) == COMPRESSION_ALGORITHM_IMLZMA)
-                    compessionHeader->CompressionType = EFI_CUSTOMIZED_COMPRESSION;
-                else if (model->compression(index) == COMPRESSION_ALGORITHM_EFI11 || model->compression(index) == COMPRESSION_ALGORITHM_TIANO)
+                }
+                else if (model->compression(index) == COMPRESSION_ALGORITHM_EFI11 || model->compression(index) == COMPRESSION_ALGORITHM_TIANO) {
                     compessionHeader->CompressionType = EFI_STANDARD_COMPRESSION;
+                }
+                else if (model->compression(index) == COMPRESSION_ALGORITHM_LZMA) {
+                    compessionHeader->CompressionType = EFI_CUSTOMIZED_COMPRESSION;
+                }
+                else if (model->compression(index) == COMPRESSION_ALGORITHM_IMLZMA) {
+                    compessionHeader->CompressionType = EFI_CUSTOMIZED_COMPRESSION;
+                }
                 else
                     return ERR_UNKNOWN_COMPRESSION_ALGORITHM;
+
+                // Compress new section body
+                QByteArray compressed;
+                result = compress(reconstructed, model->compression(index), model->dictionarySize(index), compressed);
+                if (result)
+                    return result;
 
                 // Replace new section body
                 reconstructed = compressed;
@@ -3793,7 +3972,7 @@ UINT8 FfsEngine::reconstructSection(const QModelIndex& index, const UINT32 base,
                 EFI_GUID_DEFINED_SECTION* guidDefinedHeader = (EFI_GUID_DEFINED_SECTION*)header.data();
                 // Compress new section body
                 QByteArray compressed;
-                result = compress(reconstructed, model->compression(index), compressed);
+                result = compress(reconstructed, model->compression(index), model->dictionarySize(index), compressed);
                 if (result)
                     return result;
                 // Check for authentication status valid attribute
@@ -3830,28 +4009,44 @@ UINT8 FfsEngine::reconstructSection(const QModelIndex& index, const UINT32 base,
                     .arg(model->subtype(index)), index);
                 return ERR_INVALID_SECTION;
             }
-
-            // Correct section size
-            uint32ToUint24(header.size() + reconstructed.size(), commonHeader->Size);
         }
         // Leaf section
-        else
+        else {
             reconstructed = model->body(index);
+        }
+
+        // Correct section size
+        if (extended) {
+            EFI_COMMON_SECTION_HEADER2 * extHeader = (EFI_COMMON_SECTION_HEADER2*)commonHeader;
+            extHeader->ExtendedSize = header.size() + reconstructed.size();
+            uint32ToUint24(0xFFFFFF, commonHeader->Size);
+        }
+        else {
+            uint32ToUint24(header.size() + reconstructed.size(), commonHeader->Size);
+        }
 
         // Rebase PE32 or TE image, if needed
         if ((model->subtype(index) == EFI_SECTION_PE32 || model->subtype(index) == EFI_SECTION_TE) &&
             (model->subtype(index.parent()) == EFI_FV_FILETYPE_PEI_CORE ||
-            model->subtype(index.parent()) == EFI_FV_FILETYPE_PEIM ||
-            model->subtype(index.parent()) == EFI_FV_FILETYPE_COMBINED_PEIM_DRIVER)) {
+                model->subtype(index.parent()) == EFI_FV_FILETYPE_PEIM ||
+                model->subtype(index.parent()) == EFI_FV_FILETYPE_COMBINED_PEIM_DRIVER)) {
             UINT16 teFixup = 0;
-            //TODO: add proper handling
-            /*if (model->subtype(index) == EFI_SECTION_TE) {
-                const EFI_IMAGE_TE_HEADER* teHeader = (const EFI_IMAGE_TE_HEADER*)model->body(index).constData();
-                teFixup = teHeader->StrippedSize - sizeof(EFI_IMAGE_TE_HEADER);
-            }*/
+
+            // Most EFI images today include teFixup in ImageBase value,
+            // which doesn't follow the UEFI spec, but is so popular that
+            // only a few images out of thousands are different
+
+            // There are some heuristics possible here to detect if an entry point is calculated correctly
+            // or needs a proper fixup, but new_engine already have them and it's better to work on proper
+            // builder for it than trying to fix this mess
+
+            //if (model->subtype(index) == EFI_SECTION_TE) {
+            //  const EFI_IMAGE_TE_HEADER* teHeader = (const EFI_IMAGE_TE_HEADER*)model->body(index).constData();
+            //  teFixup = teHeader->StrippedSize - sizeof(EFI_IMAGE_TE_HEADER);
+            //
 
             if (base) {
-                result = rebase(reconstructed, base - teFixup + header.size());
+                result = rebase(reconstructed, base - teFixup + header.size(), index);
                 if (result) {
                     msg(tr("reconstructSection: executable section rebase failed"), index);
                     return result;
@@ -4147,7 +4342,7 @@ UINT8 FfsEngine::findTextPattern(const QModelIndex & index, const QString & patt
     return ERR_SUCCESS;
 }
 
-UINT8 FfsEngine::rebase(QByteArray &executable, const UINT32 base)
+UINT8 FfsEngine::rebase(QByteArray &executable, const UINT32 base, const QModelIndex & index)
 {
     UINT32 delta;       // Difference between old and new base addresses
     UINT32 relocOffset; // Offset of relocation region
@@ -4220,6 +4415,9 @@ UINT8 FfsEngine::rebase(QByteArray &executable, const UINT32 base)
         relocSize = teHeader->DataDirectory[EFI_IMAGE_TE_DIRECTORY_ENTRY_BASERELOC].Size;
         // Set new base
         teHeader->ImageBase = base;
+
+        // Warn the user about possible outcome of incorrect rebase of TE image
+        msg(tr("rebase: can't determine if TE image base is adjusted or not, rebased TE image may stop working"), index);
     }
     else
         return ERR_UNKNOWN_IMAGE_TYPE;
@@ -4249,6 +4447,12 @@ UINT8 FfsEngine::rebase(QByteArray &executable, const UINT32 base)
 
         // Run this relocation record
         while (Reloc < RelocEnd) {
+            if (*Reloc == 0x0000) {
+                // Skip last emtpy reloc entry
+                Reloc += 1;
+                continue;
+            }
+
             UINT32 RelocLocation = RelocBase->VirtualAddress - teFixup + (*Reloc & 0x0FFF);
             if ((UINT32)file.size() < RelocLocation)
                 return ERR_BAD_RELOCATION_ENTRY;

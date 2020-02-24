@@ -1,14 +1,14 @@
 QT       += core
 QT       -= gui
 
-TARGET    = UEFIFind
+TARGET    = UEFIReplace
 TEMPLATE  = app
 CONFIG   += console
 CONFIG   -= app_bundle
-DEFINES  += _CONSOLE _DISABLE_ENGINE_MESSAGES
+DEFINES  += _CONSOLE
 
-SOURCES  += uefifind_main.cpp \
- uefifind.cpp \
+SOURCES  += uefireplace_main.cpp \
+ uefireplace.cpp \
  ../types.cpp \
  ../descriptor.cpp \
  ../ffs.cpp \
@@ -25,7 +25,7 @@ SOURCES  += uefifind_main.cpp \
  ../Tiano/EfiTianoCompress.c \
  ../Tiano/EfiTianoCompressLegacy.c
 
-HEADERS  += uefifind.h \
+HEADERS  += uefireplace.h \
  ../basetypes.h \
  ../descriptor.h \
  ../gbe.h \
@@ -36,8 +36,8 @@ HEADERS  += uefifind.h \
  ../ffsengine.h \
  ../treeitem.h \
  ../treemodel.h \
+ ../version.h \
  ../LZMA/LzmaCompress.h \
  ../LZMA/LzmaDecompress.h \
  ../Tiano/EfiTianoDecompress.h \
  ../Tiano/EfiTianoCompress.h
- 
