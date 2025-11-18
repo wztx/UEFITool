@@ -45,7 +45,7 @@
 
 // Constructor
 FfsParser::FfsParser(TreeModel* treeModel) : model(treeModel),
-imageBase(0), addressDiff(0x100000000ULL), protectedRegionsBase(0) {
+imageBase(0), addressDiff(0x100000000ULL), protectedRegionsBase(0), pspSpiRomBase(0) {
     fitParser = new FitParser(treeModel, this);
     nvramParser = new NvramParser(treeModel, this);
     meParser = new MeParser(treeModel, this);
@@ -6171,7 +6171,7 @@ USTATUS FfsParser::pspParseBIOSDirectory(const UByteArray& amdImage, const UINT3
                 UString info = usprintf("Full size: %Xh (%u)\n", (UINT32)sizeof(AMD_BIOS_DIRECTORY_ENTRY), (UINT32)sizeof(AMD_BIOS_DIRECTORY_ENTRY));
                 info += details + usprintf("File size: %Xh (%u)\nFile location: %" PRIX64 "h\nAddress mode: %01Xh\nDestination: %" PRIX64 "h\n",
                     size, size, e.Address, (UINT8)e.AddrMode, e.Destination);
-                result = insertByRange(entryOffset, 0, sizeof(AMD_BIOS_DIRECTORY_ENTRY),
+                insertByRange(entryOffset, 0, sizeof(AMD_BIOS_DIRECTORY_ENTRY),
                     fileName, fileText, info,
                     Types::DirectoryTableEntry, Subtypes::BiosDirectory,
                     tableIndex, childIndex);
@@ -6644,7 +6644,7 @@ USTATUS FfsParser::parseAMDImage(const UByteArray& amdImage, const UINT32 localO
         if (result == U_SUCCESS) {
             bool noEFS = false;
             UString efsTitle = efsLiteral;
-            if (efsInstance > 0) {
+            if (efsInstance != 0) {
                 efsTitle += usprintf(" #%u", efsInstance + 1);
             }
             pspIndex = model->addItem(
@@ -6652,13 +6652,11 @@ USTATUS FfsParser::parseAMDImage(const UByteArray& amdImage, const UINT32 localO
                 efsTitle, UString(), info,
                 UByteArray(), bankImage, UByteArray(),
                 Fixed, bankIndex);
-            pspParseEFTable(bankImage, probeOffset, pspIndex);
+            result = pspParseEFTable(bankImage, probeOffset, pspIndex);
             int rows = model->rowCount(pspIndex);
-            if (rows > 0) {
-                if (result != U_SUCCESS) {
+            if (rows > 0 && result != U_SUCCESS) {
                     msg(usprintf("%s: ", __FUNCTION__) + model->name(pspIndex) + UString(" was not fully parsed")
                         + (singleImage ? "" : usprintf(" (bank %u)", bankOffset / bankSize)), bankIndex);
-                }
             }
         }
         UModelIndex uefiIndex;
