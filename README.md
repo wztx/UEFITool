@@ -56,7 +56,6 @@ You can either use [pre-built binaries](https://github.com/LongSoft/UEFITool/rel
 ## Bug repellents
 
 * [Coverity Scan](https://scan.coverity.com/projects/17209) - static analyzer for C, C++, C#, JavaScript, Ruby, or Python code.
-* [SonarCloud](https://sonarcloud.io/project/overview?id=LongSoft_UEFITool) - cloud-based source code analysis service.
 
 ## GUID Database
 
