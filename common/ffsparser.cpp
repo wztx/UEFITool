@@ -6436,6 +6436,12 @@ USTATUS FfsParser::pspParseDirectory(const UByteArray & amdImage, const UINT32 o
     return result;
 }
 
+static UINT64 bitMaskFromValue(UINT64 x)
+{
+    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
+    return x;
+}
+
 USTATUS FfsParser::pspParseEFTable(const UByteArray & amdImage, const UINT32 offset, const UModelIndex & parent, const bool probe)
 {
     USTATUS result;
@@ -6557,7 +6563,6 @@ USTATUS FfsParser::pspParseEFTable(const UByteArray & amdImage, const UINT32 off
 
     return U_SUCCESS;
 }
-
 
 USTATUS FfsParser::parseAMDImage(const UByteArray& amdImage, const UINT32 localOffset, const UModelIndex& parent, UModelIndex& index)
 {
